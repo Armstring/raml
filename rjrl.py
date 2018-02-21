@@ -4,14 +4,14 @@ from torch.autograd import Variable
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.nn.init as init
-
 import gym
 import random
 import numpy as np
+import math
 torch.manual_seed(2333333)
 
 #####################
-GameName = "Copy-v0"
+GameName = "Reverse-v0"
 env = gym.make(GameName)
 num_char = env.observation_space.n #6
 
@@ -24,7 +24,7 @@ tau = 0.1
 online = False
 
 #################
-num_epoch = 4000
+num_epoch = 2500
 num_episode = 10
 num_trial = 40
 batch_size = num_episode*num_trial
@@ -32,17 +32,13 @@ MAX_STEP = 1e5
 clip_norm = 50.0
 adam_reset = False
 test_size = 100
-lr = 0.005
-decay_rate = 1.0
+lr = 0.01
+decay_rate = 0.9999
 
 ############################
 h0 = torch.zeros(dim_hidden).view(1,-1)
 c0 = torch.zeros(dim_hidden).view(1,-1)
 
-#seed_list = []
-#for ind in range(batch_size):
-#	seed_int = random.randrange(10000000)
-#	seed_list.append(seed_int)
 #####################	
 def weights_init(layer):
 	classname = layer.__class__.__name__
@@ -94,7 +90,7 @@ def onehot_action(ind):
 	res = Variable(res, requires_grad = False)
 	return res
 
-def save_log(var):#
+def save_log(var):
 	return torch.log(torch.clamp(var,min=1e-10))
 
 def softmax(ll):
@@ -165,8 +161,8 @@ def test_reward(net, size):
 			obs, reward, FLAG, info = env.step(action_tuple)
 			reward_accu += reward
 			loss_list.append(save_log(output[0][action]).data.cpu().numpy())
-		reward_list.append(reward_accu)
 
+		reward_list.append(reward_accu)
 	return np.mean(reward_list), -1.0*np.mean(loss_list)
 '''
 def test_loss(net, obs_batch, actions_batch, weight_list): #for debug
@@ -255,7 +251,6 @@ for epoch in range(1, num_epoch+1):
 			pre_loss = loss.data.cpu()[0]
 			
 		if num_step % 20==0:
-			#loss_test = 0# test_loss(policyNet, obs_batch, actions_batch, weight_list)
 			reward_test , loss_test= test_reward(policyNet, test_size)
 			print("[Reset: %r; Epoch: %d; num_step: %d] Train loss: %.5f; Test loss: %.3f; Test reward: %.3f" %(adam_reset, epoch, num_step, pre_loss, loss_test, reward_test))
 		num_step +=1
