@@ -31,7 +31,7 @@ batch_size = num_episode*num_trial
 MAX_STEP = 1e5
 clip_norm = 50.0
 adam_reset = False
-test_size = batch_size
+test_size = 100
 lr = 0.005
 decay_rate = 1.0
 
@@ -148,13 +148,12 @@ def generate_batch(samplerNet, num_episode, num_trial):
 	return actions_batch, rewards_batch, obs_batch,seed_list
 	
 def test_reward(net, size):
+	reward_list = []
 	for ind in range(size):
-		#seed_int = seed_list[ind]
-		#env.seed(seed_int)
 		obs = env.reset()
 		h = Variable(h0)
 		c = Variable(c0)
-		reward_list = []
+		reward_accu = 0.0
 		loss_list = []
 		FLAG = False
 		action = -1
@@ -164,8 +163,10 @@ def test_reward(net, size):
 			action = int(torch.distributions.Categorical(output).sample().data.cpu())
 			action_tuple = action_id_to_action(action)
 			obs, reward, FLAG, info = env.step(action_tuple)
-			reward_list.append(reward)
+			reward_accu += reward
 			loss_list.append(save_log(output[0][action]).data.cpu().numpy())
+		reward_list.append(reward_accu)
+
 	return np.mean(reward_list), -1.0*np.mean(loss_list)
 '''
 def test_loss(net, obs_batch, actions_batch, weight_list): #for debug
@@ -208,7 +209,8 @@ if use_cuda:
 
 num_step = 0
 for epoch in range(1, num_epoch+1):
-	policyNet_sample.load_state_dict(policyNet.state_dict())
+	if not online:
+		policyNet_sample.load_state_dict(policyNet.state_dict())
 	pre_loss = -100.0
 
 	if adam_reset and num_step % 2000==0:
@@ -216,7 +218,7 @@ for epoch in range(1, num_epoch+1):
 		optimizer = optim.Adam(policyNet.parameters(), lr=q)
 	
 		
-	for iter in range(10*epoch): #while True:	#
+	for iter in range(int(math.floor(math.sqrt(epoch)))): #while True:	#
 		if online:
 			actions_batch, rewards_batch, obs_batch, seed_list = generate_batch(policyNet, num_episode, num_trial)
 		else:
@@ -247,12 +249,12 @@ for epoch in range(1, num_epoch+1):
 		optimizer.step()
 		optimizer.param_groups[0]['lr'] *= decay_rate
 		
-		if abs(pre_loss - loss.data.cpu()[0]) < 1e-6:
+		if abs(pre_loss - loss.data.cpu()[0]) < 1e-4:
 			break
 		else:
 			pre_loss = loss.data.cpu()[0]
 			
-		if num_step % 50==0:
+		if num_step % 20==0:
 			#loss_test = 0# test_loss(policyNet, obs_batch, actions_batch, weight_list)
 			reward_test , loss_test= test_reward(policyNet, test_size)
 			print("[Reset: %r; Epoch: %d; num_step: %d] Train loss: %.5f; Test loss: %.3f; Test reward: %.3f" %(adam_reset, epoch, num_step, pre_loss, loss_test, reward_test))
