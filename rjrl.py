@@ -18,20 +18,20 @@ num_char = env.observation_space.n #6
 dim_obs = num_char # 0,1,2,3,4,5
 dim_output = 4* (num_char-1) # ({0,1}, {0,1}, {0,1,2,3,4})
 dim_input = dim_output +  dim_obs 
-dim_hidden = 128
+dim_hidden = 256
 tau = 0.1
 
 #################
-num_epoch = 2000
+num_epoch = 4000
 num_episode = 40
 num_trial = 10
 batch_size = num_episode*num_trial
 MAX_STEP = 1e5
 num_iter = 150
 clip_norm = 50.0
-adam_reset = False
+adam_reset = True
 test_size = 100
-lr = 0.005
+lr = 0.01
 decay_rate = 0.9999
 
 ############################
@@ -91,7 +91,6 @@ def action_id_to_action(ind):
 def generate_batch(samplerNet, num_episode, number_trial):
 	actions_batch = []
 	rewards_batch = []
-	#seeds_batch = []
 	obs_batch = []
 	for ind in range(num_trial):
 		seed_int = random.randrange(10000000)
@@ -118,7 +117,6 @@ def generate_batch(samplerNet, num_episode, number_trial):
 				reward_list.append(reward)
 				net_input = torch.cat((output, onehot(obs)), dim=1)
 
-			#seeds_batch.append(seed_int)
 			actions_batch.append(action_list)
 			rewards_batch.append(reward_list)
 			obs_batch.append(obs_list)
@@ -143,6 +141,14 @@ def test_reward(net, size):
 
 	return np.mean(reward_list)
 
+def construct_w(rewards_batch, num_episode, num_trial):
+	weight_list = np.ndarray([])
+	for ind in range(num_trial):
+		temp = rewards_batch[ind*num_episode: (ind+1)*num_episode]
+		temp_weight = [1.0*np.sum(reward_list)/tau for reward_list in temp ]
+		temp_weight = softmax(temp_weight)
+		weight_list = np.append(weight_list, temp_weight)
+	return weight_list
 ###############################################################################
 ###############################################################################
 policyNet = netP()
@@ -166,12 +172,14 @@ for epoch in range(num_epoch):
 		q = optimizer.param_groups[0]['lr']
 		optimizer = optim.Adam(policyNet.parameters(), lr=q)
 
-	for iter in range(num_iter):
+	for iter in range(3*epoch):
 		actions_batch, rewards_batch, obs_batch = generate_batch(policyNet_sample, num_episode, num_trial)
-		weight_sum_list = [1.0*np.sum(reward_list)/tau for reward_list in rewards_batch ]
-		weight_list = softmax(weight_sum_list)
+		weight_list = construct_w(rewards_batch, num_episode, num_trial)
+		#weight_sum_list = [1.0*np.sum(reward_list)/tau for reward_list in rewards_batch ]
+		#weight_list = softmax(weight_sum_list)
 		loss_list = []
-
+		
+		policyNet.zero_grad()
 		for ind in range(batch_size):
 			weight = weight_list[ind]
 			#seed_int = seeds_batch[ind]
@@ -181,9 +189,6 @@ for epoch in range(num_epoch):
 			h = Variable(h0)
 			c = Variable(c0)
 			output = Variable(p0)
-			
-			policyNet.zero_grad()
-
 			for action, obs in zip(action_list, obs_list):
 				net_input = torch.cat(( output, onehot(obs)), dim=1)
 				output, h, c = policyNet(net_input, h, c)
@@ -195,7 +200,7 @@ for epoch in range(num_epoch):
 		loss.backward()
 		torch.nn.utils.clip_grad_norm(policyNet.parameters(), clip_norm)
 		optimizer.step()
-		optimizer.param_groups[0]['lr'] /= decay_rate
+		optimizer.param_groups[0]['lr'] *= decay_rate
 		
 		#print((pre_loss, loss.data.cpu()[0]))
 		if abs(pre_loss - loss.data.cpu()[0]) < 1e-5:
@@ -205,7 +210,7 @@ for epoch in range(num_epoch):
 			
 		if num_step % 50==0:
 			reward_test = test_reward(policyNet, test_size)
-			print("[Epoch: %d; num_step: %d] Pre loss: %.5f; Test reward: %.3f" %(epoch, num_step, pre_loss, reward_test))
+			print("[Reset: %r; Epoch: %d; num_step: %d] Pre loss: %.5f; Test reward: %.3f" %(adam_reset, epoch, num_step, pre_loss, reward_test))
 		num_step +=1
 	if num_step > MAX_STEP:
 		break
