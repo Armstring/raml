@@ -11,7 +11,8 @@ import math
 torch.manual_seed(2333333)
 
 #####################
-GameName = "Copy-v0"
+GameName = "RepeatCopy-v0"
+# Copy ReversedAddition RepeatCopy Reverse
 env = gym.make(GameName)
 num_char = env.observation_space.n #6
 grid_env = False
@@ -23,11 +24,14 @@ if grid_env:
 	dim_output *= 2
 dim_input = dim_output +  dim_obs 
 dim_hidden = 128
-tau = 0.5
-tau_decay = True
-tau_decay_rate = 0.7
+tau1 = 0.01
+tau1_decay = True
+tau1_decay_rate = 2.0
+tau2 = 0.0
+
 online = False
 reward_threshold = 1.0
+reward_multiplier = 4.0
 
 #################
 num_epoch = 2500
@@ -37,12 +41,10 @@ batch_size = num_episode*num_trial
 MAX_STEP = 1e5
 clip_norm = 50.0
 adam_reset = True
-#reset_epoch = 50
-
 test_size = 100
+
 lr = 0.01
-decay_rate = 0.5
-#reset_epoch = 50
+lr_decay_rate = 0.7
 
 ############################
 h0 = torch.zeros(dim_hidden).view(1,-1)
@@ -92,8 +94,8 @@ class netP_RM(nn.Module):
 	def forward(self, input, h, c):
 		x = self.fc1(input)
 		h, c = self.lstm(x, (h,c))
-		#rm = F.elu(self.fc2(h)) + 1.0
-		rm = F.relu(self.fc2(h)) + 1e-10
+		rm = F.elu(self.fc2(h)) + 1.0
+		#rm = F.relu(self.fc2(h)) + 1e-10
 		output = rm/torch.sum(rm)
 		return output, h, c
 
@@ -118,7 +120,6 @@ def save_log(var):
 	return torch.log(torch.clamp(var,min=1e-10))
 
 def softmax(ll):
-	ll = np.asarray(ll)
 	ll = np.exp(ll - ll.max())
 	ll = 1.0*ll/np.sum(ll)
 	return ll
@@ -135,6 +136,7 @@ def generate_batch(samplerNet, num_episode, num_trial):
 	rewards_batch = []
 	obs_batch = []
 	seed_list = []
+	prob_batch = []
 	for ind in range(num_trial):
 		seed_int = random.randrange(10000000)
 		
@@ -152,12 +154,14 @@ def generate_batch(samplerNet, num_episode, num_trial):
 			action_list = []
 			reward_list = []
 			obs_list = []
+			prob_list = []
 			while not FLAG:
 				net_input = torch.cat(( onehot_action(action), onehot_obs(obs)), dim=1)
 				obs_list.append(obs)
 				output, h,c = samplerNet(net_input, h, c)
 				action = int(torch.distributions.Categorical(output).sample().data.cpu())
 				action_list.append(action)
+				prob_list.append(output[0][action].data.cpu().numpy())
 				action_tuple = action_id_to_action(action)
 				obs, reward, FLAG, info = env.step(action_tuple)
 				#print(reward/output[0][action].data.cpu().numpy())
@@ -166,7 +170,8 @@ def generate_batch(samplerNet, num_episode, num_trial):
 			actions_batch.append(action_list)
 			rewards_batch.append(reward_list)
 			obs_batch.append(obs_list)
-	return actions_batch, rewards_batch, obs_batch,seed_list
+			prob_batch.append(prob_list)
+	return actions_batch, prob_batch, rewards_batch, obs_batch,seed_list
 	
 def test_reward(net, size):
 	reward_list = []
@@ -209,12 +214,16 @@ def test_loss(net, obs_batch, actions_batch, weight_list): #for debug
 			action = y
 	return loss/batch_size
 '''
-def construct_w(weight_list, num_episode, num_trial):
+def construct_w(weight_list, log_prob_sum_list, num_episode, num_trial,tau1 = 1.0, tau2=0.0):
 	res = np.ndarray(0)
 	for ind in range(num_trial):
-		temp = weight_list[(ind*num_episode):((ind+1)*num_episode)]
-		temp_weight = softmax(temp)
-		res = np.append(res, temp_weight)
+		temp_weight = weight_list[(ind*num_episode):((ind+1)*num_episode)]
+		temp_prob = log_prob_sum_list[(ind*num_episode):((ind+1)*num_episode)]
+		temp_weight= np.asarray(temp_weight)
+		temp_prob= np.asarray(temp_prob)
+		temp = 1.0/(tau1+tau2) * temp_weight -  tau2/(tau1+tau2)*temp_prob
+		temp = softmax(temp)
+		res = np.append(res, temp)
 	return res
 ###############################################################################
 ###############################################################################
@@ -237,17 +246,13 @@ for epoch in range(1, num_epoch+1):
 	if not online:
 		policyNet_sample.load_state_dict(policyNet.state_dict())
 	pre_loss = -100.0
-	'''
-	if adam_reset and epoch % reset_epoch == 0:
-		q = optimizer.param_groups[0]['lr']
-		optimizer = optim.Adam(policyNet.parameters(), lr=q)
-		reset_epoch *=2
-	'''	
+	
 	if reward_test >reward_threshold:
-		reward_threshold *= 2.0
-		optimizer.param_groups[0]['lr'] *= decay_rate
-		if tau_decay:
-			tau *= tau_decay_rate
+		reward_threshold *= reward_multiplier
+		if optimizer.param_groups[0]['lr']>0.001:
+			optimizer.param_groups[0]['lr'] *= lr_decay_rate
+		if tau1_decay:
+			tau1 *= tau1_decay_rate
 		if adam_reset:
 			q = optimizer.param_groups[0]['lr']
 			optimizer = optim.Adam(policyNet.parameters(), lr=q)
@@ -256,11 +261,12 @@ for epoch in range(1, num_epoch+1):
 	
 	for iter in range(int(math.floor(math.sqrt(epoch)))): #while True:	#
 		if online:
-			actions_batch, rewards_batch, obs_batch, seed_list = generate_batch(policyNet, num_episode, num_trial)
+			actions_batch, prob_batch, rewards_batch, obs_batch, seed_list = generate_batch(policyNet, num_episode, num_trial)
 		else:
-			actions_batch, rewards_batch, obs_batch, seed_list = generate_batch(policyNet_sample, num_episode, num_trial)
-		weight_sum_list = [1.0*np.sum(reward_list)/tau for reward_list in rewards_batch ]
-		weight_list = construct_w(weight_sum_list, num_episode, num_trial)
+			actions_batch, prob_batch, rewards_batch, obs_batch, seed_list = generate_batch(policyNet_sample, num_episode, num_trial)
+		weight_sum_list = [1.0*np.sum(reward_list) for reward_list in rewards_batch ]
+		log_prob_sum_list = [1.0*np.sum(np.log(prob_list)) for prob_list in prob_batch]
+		weight_list = construct_w(weight_sum_list, log_prob_sum_list, num_episode, num_trial, tau1, tau2)
 		loss_list = []
 		
 		policyNet.zero_grad()
@@ -292,7 +298,7 @@ for epoch in range(1, num_epoch+1):
 			
 		if num_step % 20==0:
 			reward_test , loss_test= test_reward(policyNet, test_size)
-			print("[RM: Tau: %.2f; Tau decay: %r; Reset: %r; LR: %.3f; Epoch: %d; num_step: %d] Train loss: %.2f; Test loss: %.2f; Test reward: %.3f" %(tau, tau_decay, adam_reset, optimizer.param_groups[0]['lr'], epoch, num_step, pre_loss, loss_test, reward_test))
+			print("[ELU: Tau: %.2f; Tau decay: %r; Reset: %r; LR: %.3f; Epoch: %d; num_step: %d] Train loss: %.2f; Test loss: %.2f; Test reward: %.3f" %(tau1, tau1_decay, adam_reset, optimizer.param_groups[0]['lr'], epoch, num_step, pre_loss, loss_test, reward_test))
 		num_step +=1
 		
 
