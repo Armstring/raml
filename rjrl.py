@@ -11,17 +11,23 @@ import math
 torch.manual_seed(2333333)
 
 #####################
-GameName = "Reverse-v0"
+GameName = "Copy-v0"
 env = gym.make(GameName)
 num_char = env.observation_space.n #6
+grid_env = False
 
 ######################
 dim_obs = num_char # 0,1,2,3,4,5
 dim_output = 4* (num_char-1) # ({0,1}, {0,1}, {0,1,2,3,4})
+if grid_env:
+	dim_output *= 2
 dim_input = dim_output +  dim_obs 
-dim_hidden = 64
-tau = 0.1
+dim_hidden = 128
+tau = 0.5
+tau_decay = True
+tau_decay_rate = 0.7
 online = False
+reward_threshold = 1.0
 
 #################
 num_epoch = 2500
@@ -30,10 +36,13 @@ num_trial = 40
 batch_size = num_episode*num_trial
 MAX_STEP = 1e5
 clip_norm = 50.0
-adam_reset = False
+adam_reset = True
+#reset_epoch = 50
+
 test_size = 100
 lr = 0.01
-decay_rate = 0.9999
+decay_rate = 0.5
+#reset_epoch = 50
 
 ############################
 h0 = torch.zeros(dim_hidden).view(1,-1)
@@ -71,6 +80,21 @@ class netP(nn.Module):
 		x = self.fc1(input)
 		h, c = self.lstm(x, (h,c))
 		output = F.softmax(self.fc2(h))
+		return output, h, c
+
+class netP_RM(nn.Module):
+	def __init__(self):
+		super(netP_RM, self).__init__()
+		self.fc1 = nn.Linear(dim_input, dim_hidden)
+		self.lstm = nn.LSTMCell(dim_hidden, dim_hidden)
+		self.fc2 = nn.Linear(dim_hidden, dim_output)
+		self.apply(weights_init)
+	def forward(self, input, h, c):
+		x = self.fc1(input)
+		h, c = self.lstm(x, (h,c))
+		#rm = F.elu(self.fc2(h)) + 1.0
+		rm = F.relu(self.fc2(h)) + 1e-10
+		output = rm/torch.sum(rm)
 		return output, h, c
 
 def onehot_obs(ind):
@@ -136,7 +160,8 @@ def generate_batch(samplerNet, num_episode, num_trial):
 				action_list.append(action)
 				action_tuple = action_id_to_action(action)
 				obs, reward, FLAG, info = env.step(action_tuple)
-				reward_list.append(reward)
+				#print(reward/output[0][action].data.cpu().numpy())
+				reward_list.append(reward) #/output[0][action].data.cpu().numpy()
 
 			actions_batch.append(action_list)
 			rewards_batch.append(reward_list)
@@ -157,6 +182,7 @@ def test_reward(net, size):
 			net_input = torch.cat(( onehot_action(action), onehot_obs(obs)), dim=1)
 			output, h,c = net(net_input, h, c)
 			action = int(torch.distributions.Categorical(output).sample().data.cpu())
+			#action = int(torch.max(output, 1)[1].data.cpu()) #argmax
 			action_tuple = action_id_to_action(action)
 			obs, reward, FLAG, info = env.step(action_tuple)
 			reward_accu += reward
@@ -192,8 +218,9 @@ def construct_w(weight_list, num_episode, num_trial):
 	return res
 ###############################################################################
 ###############################################################################
-policyNet = netP()
-policyNet_sample = netP()
+policyNet = netP_RM()
+policyNet_sample = netP_RM()
+#optimizer = optim.Adam(policyNet.parameters(), lr=lr, betas = (0.5, 0.999))
 optimizer = optim.Adam(policyNet.parameters(), lr=lr)
 
 use_cuda = torch.cuda.is_available()
@@ -204,16 +231,29 @@ if use_cuda:
 	c0 = c0.cuda()
 
 num_step = 0
+reward_test = 0.0
+
 for epoch in range(1, num_epoch+1):
 	if not online:
 		policyNet_sample.load_state_dict(policyNet.state_dict())
 	pre_loss = -100.0
-
-	if adam_reset and num_step % 2000==0:
+	'''
+	if adam_reset and epoch % reset_epoch == 0:
 		q = optimizer.param_groups[0]['lr']
 		optimizer = optim.Adam(policyNet.parameters(), lr=q)
+		reset_epoch *=2
+	'''	
+	if reward_test >reward_threshold:
+		reward_threshold *= 2.0
+		optimizer.param_groups[0]['lr'] *= decay_rate
+		if tau_decay:
+			tau *= tau_decay_rate
+		if adam_reset:
+			q = optimizer.param_groups[0]['lr']
+			optimizer = optim.Adam(policyNet.parameters(), lr=q)
+
+		#
 	
-		
 	for iter in range(int(math.floor(math.sqrt(epoch)))): #while True:	#
 		if online:
 			actions_batch, rewards_batch, obs_batch, seed_list = generate_batch(policyNet, num_episode, num_trial)
@@ -243,7 +283,7 @@ for epoch in range(1, num_epoch+1):
 		loss.backward()
 		torch.nn.utils.clip_grad_norm(policyNet.parameters(), clip_norm)
 		optimizer.step()
-		optimizer.param_groups[0]['lr'] *= decay_rate
+		
 		
 		if abs(pre_loss - loss.data.cpu()[0]) < 1e-4:
 			break
@@ -252,8 +292,10 @@ for epoch in range(1, num_epoch+1):
 			
 		if num_step % 20==0:
 			reward_test , loss_test= test_reward(policyNet, test_size)
-			print("[Reset: %r; Epoch: %d; num_step: %d] Train loss: %.5f; Test loss: %.3f; Test reward: %.3f" %(adam_reset, epoch, num_step, pre_loss, loss_test, reward_test))
+			print("[RM: Tau: %.2f; Tau decay: %r; Reset: %r; LR: %.3f; Epoch: %d; num_step: %d] Train loss: %.2f; Test loss: %.2f; Test reward: %.3f" %(tau, tau_decay, adam_reset, optimizer.param_groups[0]['lr'], epoch, num_step, pre_loss, loss_test, reward_test))
 		num_step +=1
+		
+
 	if num_step > MAX_STEP:
 		break
 
